@@ -1,7 +1,8 @@
 import User from "../models/User.model.js"
 import { sendTokenResponse } from "../utils/generateToken.js"
 import crypto from "crypto"
-
+import { sendEmail } from "../utils/sendEmail.js";
+import { otpEmailTemplate } from "../utils/otpTemplate.js";
 // @desc    Register user
 // @route   POST /api/auth/register
 export const register = async (req, res) => {
@@ -124,44 +125,67 @@ export const getMe = async (req, res) => {
     res.status(500).json({ success: false, message: error.message })
   }
 }
-
-// @desc    Forgot password
-// @route   POST /api/auth/forgot-password
+// @desc    Send OTP for password reset
+// <CHANGE> Ensure OTP is stored as string
 export const forgotPassword = async (req, res) => {
   try {
-    const user = await User.findOne({ email: req.body.email })
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide an email",
+      });
+    }
 
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user) {
       return res.status(404).json({
         success: false,
         message: "No user found with that email",
-      })
+      });
     }
 
-    // Generate reset token
-    const resetToken = crypto.randomBytes(20).toString("hex")
+    // Generate OTP and explicitly store as string
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    console.log("[DEBUG] Generated OTP:", otp); // Remove in production
+    
+    user.resetPasswordOTP = otp; // Already a string from .toString()
+    user.resetPasswordOTPExpire = Date.now() + 10 * 60 * 1000; // 10 mins
+    await user.save({ validateBeforeSave: false });
 
-    user.resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex")
-
-    user.resetPasswordExpire = Date.now() + 10 * 60 * 1000 // 10 minutes
-
-    await user.save({ validateBeforeSave: false })
-
-    // In production, send email with reset URL
-    // For now, return the token
-    res.status(200).json({
-      success: true,
-      message: "Password reset token generated",
-      resetToken, // Remove this in production
-    })
+    try {
+      await sendEmail(
+        user.email,
+        "Your Password Reset OTP",
+        otpEmailTemplate(user.firstName + " " + user.lastName, otp)
+      );
+      
+      console.log("[DEBUG] OTP email sent successfully"); // Remove in production
+      
+      return res.status(200).json({
+        success: true,
+        message: "OTP sent successfully to your email",
+      });
+    } catch (emailError) {
+      console.error("Email sending failed:", emailError);
+      user.resetPasswordOTP = undefined;
+      user.resetPasswordOTPExpire = undefined;
+      await user.save({ validateBeforeSave: false });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send OTP email. Please try again later.",
+      });
+    }
   } catch (error) {
-    res.status(500).json({
+    console.error("Forgot Password Error:", error);
+    return res.status(500).json({
       success: false,
-      message: error.message,
-    })
+      message: "Server error",
+      error: error.message, // Remove in production
+    });
   }
-}
-
+};
 // @desc    Reset password
 // @route   POST /api/auth/reset-password
 export const resetPassword = async (req, res) => {
@@ -193,4 +217,84 @@ export const resetPassword = async (req, res) => {
       message: error.message,
     })
   }
-}
+}// CORRECTED verifyOtpAndResetPassword function
+export const verifyOtpAndResetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    // <CHANGE> Added validation for all required fields
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, OTP, and new password are required",
+      });
+    }
+
+    // <CHANGE> Clean inputs consistently
+    const cleanEmail = email.toLowerCase().trim();
+    const cleanOtp = otp.toString().trim(); // Convert to string first, then trim
+
+    console.log("[DEBUG] Verifying OTP for email:", cleanEmail);
+    console.log("[DEBUG] OTP provided:", cleanOtp);
+
+    const user = await User.findOne({
+      email: cleanEmail,
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "No user found with this email",
+      });
+    }
+
+    console.log("[DEBUG] User found. Stored OTP:", user.resetPasswordOTP);
+    console.log("[DEBUG] OTP Expiry:", user.resetPasswordOTPExpire, "Current time:", Date.now());
+
+    // <CHANGE> Check if OTP exists first
+    if (!user.resetPasswordOTP) {
+      return res.status(400).json({
+        success: false,
+        message: "No OTP requested. Please request a new OTP.",
+      });
+    }
+
+    // <CHANGE> Check expiry before comparing OTP
+    if (user.resetPasswordOTPExpire < Date.now()) {
+      user.resetPasswordOTP = undefined;
+      user.resetPasswordOTPExpire = undefined;
+      await user.save({ validateBeforeSave: false });
+      return res.status(400).json({
+        success: false,
+        message: "OTP has expired. Please request a new one.",
+      });
+    }
+
+    // <CHANGE> Compare OTP as strings
+    const storedOtp = user.resetPasswordOTP.toString().trim();
+    if (cleanOtp !== storedOtp) {
+      console.log("[DEBUG] OTP mismatch. Expected:", storedOtp, "Got:", cleanOtp);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP",
+      });
+    }
+
+    console.log("[DEBUG] OTP verified successfully!");
+
+    // Success! Reset password
+    user.passwordHash = newPassword;
+    user.resetPasswordOTP = undefined;
+    user.resetPasswordOTPExpire = undefined;
+    await user.save();
+
+    sendTokenResponse(user, 200, res);
+  } catch (error) {
+    console.error("[ERROR] OTP verification failed:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message, // Remove in production
+    });
+  }
+};

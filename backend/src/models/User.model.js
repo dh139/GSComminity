@@ -92,10 +92,19 @@ const userSchema = new mongoose.Schema(
     },
     resetPasswordToken: String,
     resetPasswordExpire: Date,
+    // <CHANGE> Added OTP fields for password reset via email OTP
+    resetPasswordOTP: {
+      type: String,
+      default: undefined,
+    },
+    resetPasswordOTPExpire: {
+      type: Date,
+      default: undefined,
+    },
   },
   {
     timestamps: true,
-  },
+  }
 )
 
 // Hash password before saving
